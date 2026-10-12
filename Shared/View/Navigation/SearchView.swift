@@ -18,7 +18,7 @@ struct SearchView: View {
     @State private var showPopup = false
     @State private var popupType: ActionPopupItems?
     @State private var scope: SearchItemsScope = .noScope
-    @State private var currentlyQuery = String()
+    @State private var currentQueryRevision: UUID?
     @Binding var shouldFocusOnSearchField: Bool
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     var body: some View {
@@ -58,11 +58,11 @@ struct SearchView: View {
         .searchable(text: $viewModel.query, placement: .toolbar, prompt: "Movies, Shows, People")
 #endif
         .disableAutocorrection(true)
-        .task(id: viewModel.query) {
-            if currentlyQuery != viewModel.query {
-                currentlyQuery = viewModel.query
-                await viewModel.search(viewModel.query)
-            }
+        .task(id: viewModel.queryRevision) {
+            guard !Task.isCancelled,
+                  currentQueryRevision != viewModel.queryRevision else { return }
+            currentQueryRevision = viewModel.queryRevision
+            await viewModel.search(viewModel.query)
         }
         .actionPopup(isShowing: $showPopup, for: popupType)
 #if os(tvOS)

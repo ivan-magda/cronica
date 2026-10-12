@@ -1135,3 +1135,303 @@ final class CronicaTests: XCTestCase {
         return item
     }
 }
+
+final class SearchViewModelTests: XCTestCase {
+    @MainActor
+    func testCancelledKeywordRequestStopsFilteringAndPublication() async throws {
+        try await withSearchFiltering {
+            let items = try [makeItem(id: 1), makeItem(id: 2)]
+            let response = SuspendedSearchResponse<[ItemContentKeyword]>()
+            defer { response.complete(.failure(CancellationError())) }
+            var keywordIDs = [Int]()
+            let model = SearchViewModel(search: { _, _ in items }, fetchKeywords: { _, id in
+                keywordIDs.append(id)
+                if id == 1 { return try await response.value() }
+                return []
+            })
+            model.query = "A"
+            let search = Task { await model.search("A") }
+            await fulfillment(of: [response.started], timeout: 3)
+
+            search.cancel()
+            response.complete(.failure(CancellationError()))
+            await search.value
+
+            XCTAssertEqual(keywordIDs, [1])
+            XCTAssertTrue(model.items.isEmpty)
+            XCTAssertFalse(model.startPagination)
+            XCTAssertNil(model.catalogFailure)
+            XCTAssertNotEqual(model.stage, .success)
+            XCTAssertNotEqual(model.stage, .failure)
+        }
+    }
+
+    @MainActor
+    func testQueryChangeInvalidatesKeywordsBeforeReplacementSearchStarts() async throws {
+        try await withSearchFiltering {
+            let items = try [makeItem(id: 1), makeItem(id: 2)]
+            let current = try makeItem(id: 3)
+            let response = SuspendedSearchResponse<[ItemContentKeyword]>()
+            defer { response.complete(.failure(CancellationError())) }
+            var searches = 0
+            var keywordIDs = [Int]()
+            let model = SearchViewModel(search: { _, _ in
+                searches += 1
+                return searches == 1 ? items : [current]
+            }, fetchKeywords: { _, id in
+                keywordIDs.append(id)
+                if id == 1 { return try await response.value() }
+                return []
+            })
+            model.query = "A"
+            let originalRevision = model.queryRevision
+            let search = Task { await model.search("A") }
+            await fulfillment(of: [response.started], timeout: 3)
+            XCTAssertEqual(model.queryRevision, originalRevision)
+
+            model.query = "B"
+            let intermediateRevision = model.queryRevision
+            model.query = "A"
+            let replacementRevision = model.queryRevision
+            XCTAssertNotEqual(intermediateRevision, originalRevision)
+            XCTAssertNotEqual(replacementRevision, originalRevision)
+            XCTAssertNotEqual(replacementRevision, intermediateRevision)
+            model.query = "A"
+            XCTAssertEqual(model.queryRevision, replacementRevision)
+            response.complete(.success([]))
+            await search.value
+
+            XCTAssertEqual(keywordIDs, [1])
+            XCTAssertTrue(model.items.isEmpty)
+            XCTAssertFalse(model.startPagination)
+            XCTAssertNil(model.catalogFailure)
+
+            await model.search(model.query)
+
+            XCTAssertEqual(model.queryRevision, replacementRevision)
+            XCTAssertEqual(keywordIDs, [1, current.id])
+            XCTAssertEqual(model.items.map(\.id), [current.id])
+            XCTAssertEqual(model.stage, .success)
+            XCTAssertTrue(model.startPagination)
+        }
+    }
+
+    @MainActor
+    func testObsoleteSearchCannotPublishAfterQueryReturnsToSameText() async throws {
+        try await withSearchFiltering {
+            let obsolete = try makeItem(id: 1)
+            let current = try makeItem(id: 2)
+            let response = SuspendedSearchResponse<[SearchItemContent]>()
+            defer { response.complete(.failure(CancellationError())) }
+            var searches = 0
+            var keywordIDs = [Int]()
+            let model = SearchViewModel(search: { _, _ in
+                searches += 1
+                if searches == 1 { return try await response.value() }
+                return [current]
+            }, fetchKeywords: { _, id in
+                keywordIDs.append(id)
+                return []
+            })
+            model.query = "A"
+            let firstSearch = Task { await model.search("A") }
+            await fulfillment(of: [response.started], timeout: 3)
+            model.query = "B"
+            await model.search("B")
+            model.query = "A"
+            await model.search("A")
+
+            response.complete(.success([obsolete]))
+            await firstSearch.value
+
+            XCTAssertEqual(model.items.map(\.id), [current.id])
+            XCTAssertEqual(keywordIDs, [current.id, current.id])
+            XCTAssertEqual(model.stage, .success)
+            XCTAssertNil(model.catalogFailure)
+            XCTAssertTrue(model.startPagination)
+        }
+    }
+
+    @MainActor
+    func testObsoleteSearchErrorCannotReplaceSuccessfulRetry() async throws {
+        try await withSearchFiltering {
+            let current = try makeItem(id: 2)
+            let response = SuspendedSearchResponse<[SearchItemContent]>()
+            defer { response.complete(.failure(CancellationError())) }
+            var searches = 0
+            let model = SearchViewModel(search: { _, _ in
+                searches += 1
+                if searches == 1 { return try await response.value() }
+                return [current]
+            }, fetchKeywords: { _, _ in [] })
+            model.query = "A"
+            let firstSearch = Task { await model.search("A") }
+            await fulfillment(of: [response.started], timeout: 3)
+            await model.search("A")
+
+            response.complete(.failure(URLError(.notConnectedToInternet)))
+            await firstSearch.value
+
+            XCTAssertEqual(model.items.map(\.id), [current.id])
+            XCTAssertEqual(model.stage, .success)
+            XCTAssertNil(model.catalogFailure)
+            XCTAssertTrue(model.startPagination)
+        }
+    }
+
+    @MainActor
+    func testClearingQueryCancelsPaginationAndRejectsLateResults() async throws {
+        try await withSearchFiltering {
+            let initial = try makeItem(id: 1)
+            let obsolete = try makeItem(id: 2)
+            for lateItems in [[], [obsolete]] {
+                let response = SuspendedSearchResponse<[SearchItemContent]>()
+                defer { response.complete(.failure(CancellationError())) }
+                var keywordIDs = [Int]()
+                let model = SearchViewModel(search: { _, page in
+                    if page == "1" { return [initial] }
+                    return try await response.value()
+                }, fetchKeywords: { _, id in
+                    keywordIDs.append(id)
+                    return []
+                })
+                model.query = "A"
+                await model.search("A")
+                model.loadMoreItems()
+                let pagination = try XCTUnwrap(model.paginationTask)
+                await fulfillment(of: [response.started], timeout: 3)
+
+                model.query = ""
+                XCTAssertTrue(pagination.isCancelled)
+                await model.search("")
+                response.complete(.success(lateItems))
+                await pagination.value
+
+                XCTAssertTrue(model.items.isEmpty)
+                XCTAssertEqual(keywordIDs, [initial.id])
+                XCTAssertEqual(model.stage, .none)
+                XCTAssertFalse(model.startPagination)
+                XCTAssertFalse(model.endPagination)
+                XCTAssertNil(model.paginationTask)
+                XCTAssertNil(model.catalogFailure)
+            }
+        }
+    }
+
+    @MainActor
+    func testObsoletePaginationCleanupDoesNotUnlockCurrentPage() async throws {
+        try await withSearchFiltering {
+            let initial = try makeItem(id: 1)
+            let obsolete = try makeItem(id: 2)
+            let current = try makeItem(id: 3)
+            let oldResponse = SuspendedSearchResponse<[SearchItemContent]>()
+            defer { oldResponse.complete(.failure(CancellationError())) }
+            let currentResponse = SuspendedSearchResponse<[SearchItemContent]>()
+            defer { currentResponse.complete(.failure(CancellationError())) }
+            var requests = [String]()
+            var secondPages = 0
+            let model = SearchViewModel(search: { query, page in
+                requests.append("\(query):\(page)")
+                if page == "1" { return [initial] }
+                if page == "2" {
+                    secondPages += 1
+                    if secondPages == 1 { return try await oldResponse.value() }
+                    if secondPages == 2 { return try await currentResponse.value() }
+                }
+                return []
+            }, fetchKeywords: { _, _ in [] })
+            model.query = "A"
+            await model.search("A")
+            model.loadMoreItems()
+            let oldPagination = try XCTUnwrap(model.paginationTask)
+            await fulfillment(of: [oldResponse.started], timeout: 3)
+            await model.search("A")
+            model.loadMoreItems()
+            let currentPagination = try XCTUnwrap(model.paginationTask)
+            await fulfillment(of: [currentResponse.started], timeout: 3)
+
+            oldResponse.complete(.success([obsolete]))
+            await oldPagination.value
+            XCTAssertNotNil(model.paginationTask)
+            model.loadMoreItems()
+            let afterDuplicateRequest = model.paginationTask
+            currentResponse.complete(.success([current]))
+            await currentPagination.value
+            await afterDuplicateRequest?.value
+
+            XCTAssertEqual(model.items.map(\.id), [initial.id, current.id])
+            XCTAssertEqual(requests, ["A:1", "A:2", "A:1", "A:2"])
+            model.loadMoreItems()
+            let nextPagination = try XCTUnwrap(model.paginationTask)
+            await nextPagination.value
+            XCTAssertEqual(requests, ["A:1", "A:2", "A:1", "A:2", "A:3"])
+            XCTAssertTrue(model.endPagination)
+        }
+    }
+
+    @MainActor
+    func testOrdinaryKeywordFailureKeepsItemAndContinuesFiltering() async throws {
+        try await withSearchFiltering {
+            let fallback = try makeItem(id: 1, popularity: 10)
+            let excluded = try makeItem(id: 2, popularity: 20)
+            let safe = try makeItem(id: 3, popularity: 30)
+            let blockedID = try XCTUnwrap(nsfwKeywords.first)
+            let blocked = try JSONDecoder().decode(
+                ItemContentKeyword.self, from: Data("{\"id\":\(blockedID)}".utf8)
+            )
+            var keywordIDs = [Int]()
+            let model = SearchViewModel(search: { _, _ in [fallback, excluded, safe] }, fetchKeywords: { _, id in
+                keywordIDs.append(id)
+                if id == fallback.id { throw URLError(.notConnectedToInternet) }
+                if id == excluded.id { return [blocked] }
+                return []
+            })
+            model.query = "A"
+            await model.search("A")
+
+            XCTAssertEqual(keywordIDs, [fallback.id, excluded.id, safe.id])
+            XCTAssertEqual(model.items.map(\.id), [safe.id, fallback.id])
+            XCTAssertEqual(model.stage, .success)
+            XCTAssertNil(model.catalogFailure)
+            XCTAssertTrue(model.startPagination)
+        }
+    }
+
+    @MainActor
+    private func withSearchFiltering(_ operation: @MainActor () async throws -> Void) async rethrows {
+        let previousValue = SettingsStore.shared.disableSearchFilter
+        SettingsStore.shared.disableSearchFilter = false
+        defer { SettingsStore.shared.disableSearchFilter = previousValue }
+        try await operation()
+    }
+
+    private func makeItem(id: Int, popularity: Double = 1) throws -> SearchItemContent {
+        let json = "{\"id\":\(id),\"title\":\"Item \(id)\",\"popularity\":\(popularity),\"mediaType\":\"movie\"}"
+        return try JSONDecoder().decode(SearchItemContent.self, from: Data(json.utf8))
+    }
+}
+
+@MainActor
+private final class SuspendedSearchResponse<Value> {
+    let started = XCTestExpectation(description: "Request started")
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var result: Result<Value, Error>?
+
+    func value() async throws -> Value {
+        try await withCheckedThrowingContinuation { continuation in
+            if let result {
+                continuation.resume(with: result)
+            } else {
+                self.continuation = continuation
+            }
+            started.fulfill()
+        }
+    }
+
+    func complete(_ result: Result<Value, Error>) {
+        guard self.result == nil else { return }
+        self.result = result
+        continuation?.resume(with: result)
+        continuation = nil
+    }
+}

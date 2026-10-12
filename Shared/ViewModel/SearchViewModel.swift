@@ -9,8 +9,17 @@ import Foundation
 import SwiftUI
 
 @MainActor final class SearchViewModel: ObservableObject {
-    @Published var query: String = ""
-    private var service: NetworkService = NetworkService.shared
+    @Published var query: String = "" {
+        didSet {
+            if query != oldValue {
+                invalidateSearch()
+                queryRevision = UUID()
+            }
+        }
+    }
+    @Published private(set) var queryRevision = UUID()
+    private let searchItems: @MainActor (String, String) async throws -> [SearchItemContent]
+    private let fetchKeywords: @MainActor (MediaType, Int) async throws -> [ItemContentKeyword]
     var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -18,12 +27,24 @@ import SwiftUI
     @Published var items = [SearchItemContent]()
     @Published var startPagination: Bool = false
     @Published var endPagination: Bool = false
-    private var isLoadingMore = false
+    private var searchGeneration = UUID()
+    private(set) var paginationTask: Task<Void, Never>?
     @Published var stage: SearchStage = .none
     @Published private(set) var catalogFailure: TMDBConnectionFailure?
 
+    init(search: @escaping @MainActor (String, String) async throws -> [SearchItemContent] = {
+        try await NetworkService.shared.search(query: $0, page: $1)
+    }, fetchKeywords: @escaping @MainActor (MediaType, Int) async throws -> [ItemContentKeyword] = {
+        try await NetworkService.shared.fetchKeywords(type: $0, id: $1)
+    }) {
+        self.searchItems = search
+        self.fetchKeywords = fetchKeywords
+    }
+
     func search(_ query: String) async {
         if Task.isCancelled { return }
+        invalidateSearch()
+        let generation = searchGeneration
         if query.isEmpty {
             startPagination = false
             withAnimation {
@@ -38,25 +59,26 @@ import SwiftUI
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else { return }
         do {
-            if Task.isCancelled {
-                withAnimation { stage = .none }
-                return
-            }
+            try checkCancellation(for: generation)
             try await Task.sleep(nanoseconds: 300_000_000)
+            try checkCancellation(for: generation)
             if !items.isEmpty {
                 items.removeAll()
             }
             // restart pagination values
             page = 1
             endPagination = false
-            let result = try await service.search(query: trimmedQuery, page: "1")
-            page += 1
+            let result = try await searchItems(trimmedQuery, "1")
+            try checkCancellation(for: generation)
+            let filtered: [SearchItemContent]
             if SettingsStore.shared.disableSearchFilter {
-                items.append(contentsOf: result.sorted(by: { $0.itemPopularity > $1.itemPopularity }))
+                filtered = result
             } else {
-                let filtered = await filter(for: result)
-                items.append(contentsOf: filtered.sorted(by: { $0.itemPopularity > $1.itemPopularity }))
+                filtered = try await filter(for: result, generation: generation)
             }
+            try checkCancellation(for: generation)
+            items.append(contentsOf: filtered.sorted(by: { $0.itemPopularity > $1.itemPopularity }))
+            page = 2
             if self.items.isEmpty {
                 withAnimation { stage = .empty }
                 return
@@ -64,8 +86,8 @@ import SwiftUI
             withAnimation {  stage = .success }
             startPagination = true
         } catch {
-            if query.isEmpty, !items.isEmpty { items.removeAll() }
-            if Task.isCancelled { return }
+            guard generation == searchGeneration, !Task.isCancelled,
+                  !(error is CancellationError) else { return }
             catalogFailure = TMDBConnectionFailure.classify(error)
             withAnimation { stage = .failure }
             CronicaTelemetry.shared.handleMessage(error.localizedDescription,
@@ -76,27 +98,54 @@ import SwiftUI
     func loadMoreItems() {
         if Task.isCancelled { return }
         if items.isEmpty { return }
+        if !startPagination { return }
         if endPagination { return }
-        if isLoadingMore { return }
-        isLoadingMore = true
-        Task {
-            defer { isLoadingMore = false }
-            let result = try? await service.search(query: trimmedQuery, page: "\(page)")
-            guard let result else { return }
-            if result.isEmpty { endPagination.toggle() }
-            let filtered = await filter(for: result)
-            withAnimation {
-                self.items.append(contentsOf: filtered.sorted(by: { $0.itemPopularity > $1.itemPopularity }))
+        if paginationTask != nil { return }
+        let generation = searchGeneration
+        let query = trimmedQuery
+        let page = self.page
+        paginationTask = Task {
+            defer {
+                if generation == searchGeneration, !Task.isCancelled {
+                    paginationTask = nil
+                }
             }
-            self.page += 1
+            do {
+                try checkCancellation(for: generation)
+                let result = try await searchItems(query, "\(page)")
+                try checkCancellation(for: generation)
+                let filtered = try await filter(for: result, generation: generation)
+                try checkCancellation(for: generation)
+                withAnimation {
+                    self.items.append(contentsOf: filtered.sorted(by: { $0.itemPopularity > $1.itemPopularity }))
+                }
+                if result.isEmpty { endPagination = true }
+                self.page = page + 1
+            } catch {
+                return
+            }
         }
     }
+
+    private func invalidateSearch() {
+        searchGeneration = UUID()
+        paginationTask?.cancel()
+        paginationTask = nil
+        startPagination = false
+    }
+
+    private func checkCancellation(for generation: UUID) throws {
+        try Task.checkCancellation()
+        guard generation == searchGeneration else { throw CancellationError() }
+    }
 	
-    private func filter(for items: [SearchItemContent]) async -> [SearchItemContent] {
+    private func filter(for items: [SearchItemContent], generation: UUID) async throws -> [SearchItemContent] {
         var result = [SearchItemContent]()
         for item in items {
-            let contentKeywords = try? await service.fetchKeywords(type: item.itemContentMedia, id: item.id)
-            if let contentKeywords {
+            try checkCancellation(for: generation)
+            do {
+                let contentKeywords = try await fetchKeywords(item.itemContentMedia, item.id)
+                try checkCancellation(for: generation)
                 var keywordsArray = [Int]()
                 let _: [()] = contentKeywords.map { item in
                     keywordsArray.append(item.id)
@@ -105,7 +154,9 @@ import SwiftUI
                 if !containsNSFW {
                     result.append(item)
                 }
-            } else {
+            } catch {
+                try checkCancellation(for: generation)
+                if error is CancellationError { throw error }
                 result.append(item)
             }
         }

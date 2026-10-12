@@ -762,6 +762,62 @@ final class CronicaTests: XCTestCase {
         XCTAssertEqual(decoded, ops)
     }
 
+    @MainActor
+    func testTMDBPushQueueReducerReplacesMatchingOperationAtEnd() {
+        let replacement = TMDBPushService.Operation.watchlist(tmdb: 1, media: 0, onList: false)
+        var queue: [TMDBPushService.Operation] = [
+            .favorite(tmdb: 9, media: 0, isFavorite: true),
+            .watchlist(tmdb: 1, media: 0, onList: true),
+            .rating(tmdb: 7, media: 0, value: 8),
+            .watchlist(tmdb: 2, media: 1, onList: true)
+        ]
+
+        TMDBPushQueueReducer.append(replacement, to: &queue)
+
+        XCTAssertEqual(queue, [
+            .favorite(tmdb: 9, media: 0, isFavorite: true),
+            .rating(tmdb: 7, media: 0, value: 8),
+            .watchlist(tmdb: 2, media: 1, onList: true),
+            replacement
+        ])
+    }
+
+    @MainActor
+    func testTMDBPushQueueReducerTreatsRatingAndRemovalAsOneKeyFamily() {
+        var queue: [TMDBPushService.Operation] = [
+            .favorite(tmdb: 8, media: 0, isFavorite: true),
+            .removeRating(tmdb: 5, media: 0)
+        ]
+
+        TMDBPushQueueReducer.append(.rating(tmdb: 5, media: 0, value: 9), to: &queue)
+        XCTAssertEqual(queue, [
+            .favorite(tmdb: 8, media: 0, isFavorite: true),
+            .rating(tmdb: 5, media: 0, value: 9)
+        ])
+
+        TMDBPushQueueReducer.append(.removeRating(tmdb: 5, media: 0), to: &queue)
+        XCTAssertEqual(queue, [
+            .favorite(tmdb: 8, media: 0, isFavorite: true),
+            .removeRating(tmdb: 5, media: 0)
+        ])
+    }
+
+    @MainActor
+    func testTMDBPushQueueReducerKeepsMediaTypesDistinct() {
+        var queue: [TMDBPushService.Operation] = [
+            .rating(tmdb: 5, media: 0, value: 7),
+            .favorite(tmdb: 8, media: 0, isFavorite: true)
+        ]
+
+        TMDBPushQueueReducer.append(.removeRating(tmdb: 5, media: 1), to: &queue)
+
+        XCTAssertEqual(queue, [
+            .rating(tmdb: 5, media: 0, value: 7),
+            .favorite(tmdb: 8, media: 0, isFavorite: true),
+            .removeRating(tmdb: 5, media: 1)
+        ])
+    }
+
     private enum SelfHelper {
         static func makeTVContent(id: Int, episodeNumber: Int, seasonNumber: Int, airDate: Date) -> ItemContent {
             let airDateString = DatesManager.dateFormatter.string(from: airDate)

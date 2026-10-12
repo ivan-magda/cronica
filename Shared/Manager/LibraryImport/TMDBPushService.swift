@@ -92,8 +92,15 @@ final class TMDBPushService {
         )
 
         var queued = 0
+        var queue = loadQueue()
         for (index, item) in items.enumerated() {
-            try Task.checkCancellation()
+            do {
+                try Task.checkCancellation()
+            } catch {
+                // Keep operations already reduced from earlier rows if this upload is cancelled.
+                saveQueue(queue)
+                throw error
+            }
             let tmdb = item.itemId
             guard tmdb > 0 else {
                 progress?(
@@ -108,18 +115,27 @@ final class TMDBPushService {
             let media = Int(item.itemMedia.toInt)
 
             // Match live push semantics: watched → off watchlist; otherwise keep on watchlist.
-            append(.watchlist(tmdb: tmdb, media: media, onList: !item.isWatched))
+            TMDBPushQueueReducer.append(
+                .watchlist(tmdb: tmdb, media: media, onList: !item.isWatched),
+                to: &queue
+            )
             queued += 1
 
             if item.favorite {
-                append(.favorite(tmdb: tmdb, media: media, isFavorite: true))
+                TMDBPushQueueReducer.append(
+                    .favorite(tmdb: tmdb, media: media, isFavorite: true),
+                    to: &queue
+                )
                 queued += 1
             }
 
             let rating = Int(item.userRating)
             if rating > 0 {
                 let value = LibraryImportService.tenPointRating(fromCronica: rating)
-                append(.rating(tmdb: tmdb, media: media, value: value))
+                TMDBPushQueueReducer.append(
+                    .rating(tmdb: tmdb, media: media, value: value),
+                    to: &queue
+                )
                 queued += 1
             }
 
@@ -132,6 +148,8 @@ final class TMDBPushService {
             )
         }
 
+        // Persist the complete batch before flush can suspend on network I/O.
+        saveQueue(queue)
         let sent = await flush(progress: progress)
         let remaining = loadQueue().count
         return UploadSummary(queued: queued, sent: sent, remaining: remaining)
@@ -212,19 +230,7 @@ final class TMDBPushService {
 
     private func append(_ op: Operation) {
         var queue = loadQueue()
-        // Replace earlier ops targeting the same list/rating key so the latest wins.
-        queue.removeAll { existing in
-            switch (existing, op) {
-            case let (.watchlist(a, am, _), .watchlist(b, bm, _)) where a == b && am == bm: true
-            case let (.favorite(a, am, _), .favorite(b, bm, _)) where a == b && am == bm: true
-            case let (.rating(a, am, _), .rating(b, bm, _)) where a == b && am == bm: true
-            case let (.rating(a, am, _), .removeRating(b, bm)) where a == b && am == bm: true
-            case let (.removeRating(a, am), .rating(b, bm, _)) where a == b && am == bm: true
-            case let (.removeRating(a, am), .removeRating(b, bm)) where a == b && am == bm: true
-            default: false
-            }
-        }
-        queue.append(op)
+        TMDBPushQueueReducer.append(op, to: &queue)
         saveQueue(queue)
     }
 
@@ -269,5 +275,23 @@ final class TMDBPushService {
 
     private func mediaTypeString(_ media: Int) -> String {
         media == Int(MediaType.tvShow.toInt) ? "tv" : "movie"
+    }
+}
+
+/// Applies the same latest-wins queue semantics to live and bulk pushes.
+enum TMDBPushQueueReducer {
+    static func append(_ op: TMDBPushService.Operation, to queue: inout [TMDBPushService.Operation]) {
+        queue.removeAll { existing in
+            switch (existing, op) {
+            case let (.watchlist(a, am, _), .watchlist(b, bm, _)) where a == b && am == bm: true
+            case let (.favorite(a, am, _), .favorite(b, bm, _)) where a == b && am == bm: true
+            case let (.rating(a, am, _), .rating(b, bm, _)) where a == b && am == bm: true
+            case let (.rating(a, am, _), .removeRating(b, bm)) where a == b && am == bm: true
+            case let (.removeRating(a, am), .rating(b, bm, _)) where a == b && am == bm: true
+            case let (.removeRating(a, am), .removeRating(b, bm)) where a == b && am == bm: true
+            default: false
+            }
+        }
+        queue.append(op)
     }
 }

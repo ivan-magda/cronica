@@ -36,6 +36,7 @@ final class WidgetSnapshotPublisher {
     }
 
     func publish() async {
+        guard !Task.isCancelled else { return }
         guard WidgetAppGroup.containerURL != nil else {
             AppLogger.persistence.warning("Widget app group container unavailable; skipping snapshot publish.")
             reloadWidgetTimelines()
@@ -46,8 +47,9 @@ final class WidgetSnapshotPublisher {
         let upNextItems = fetchUpNextItems(in: context)
         let watchlistItems = fetchWatchlistItems(in: context)
 
-        let upNextSnapshotItems = await buildUpNextSnapshotItems(from: upNextItems)
-        let watchlistSnapshotItems = await buildWatchlistSnapshotItems(from: watchlistItems)
+        guard let upNextSnapshotItems = await buildUpNextSnapshotItems(from: upNextItems),
+              let watchlistSnapshotItems = await buildWatchlistSnapshotItems(from: watchlistItems),
+              !Task.isCancelled else { return }
 
         do {
             try WidgetSnapshotStore.writeUpNext(
@@ -124,14 +126,16 @@ final class WidgetSnapshotPublisher {
 
     // MARK: - Build
 
-    private func buildUpNextSnapshotItems(from items: [WatchlistItem]) async -> [WidgetSnapshotItem] {
+    private func buildUpNextSnapshotItems(from items: [WatchlistItem]) async -> [WidgetSnapshotItem]? {
         var results = [WidgetSnapshotItem]()
         for item in items.prefix(WidgetSnapshotLayout.maxItems) {
+            guard !Task.isCancelled else { return nil }
             let season = Int(item.itemNextUpNextSeason)
             let episode = Int(item.itemNextUpNextEpisode)
             let subtitle = String(format: String(localized: "S%d · E%d"), season, episode)
             let deepLink = "cronica://\(item.itemContentID)"
             let posterFileName = await cachePoster(for: item)
+            guard !Task.isCancelled else { return nil }
             results.append(
                 WidgetSnapshotItem(
                     id: item.itemContentID,
@@ -147,12 +151,14 @@ final class WidgetSnapshotPublisher {
         return results
     }
 
-    private func buildWatchlistSnapshotItems(from items: [WatchlistItem]) async -> [WidgetSnapshotItem] {
+    private func buildWatchlistSnapshotItems(from items: [WatchlistItem]) async -> [WidgetSnapshotItem]? {
         var results = [WidgetSnapshotItem]()
         for item in items {
+            guard !Task.isCancelled else { return nil }
             let subtitle = watchlistSubtitle(for: item)
             let deepLink = "cronica://\(item.itemContentID)"
             let posterFileName = await cachePoster(for: item)
+            guard !Task.isCancelled else { return nil }
             results.append(
                 WidgetSnapshotItem(
                     id: item.itemContentID,
@@ -199,7 +205,9 @@ final class WidgetSnapshotPublisher {
             return nil
         }
 
-        guard let data = try? await NetworkService.shared.downloadData(from: imageURL),
+        let data = try? await NetworkService.shared.downloadData(from: imageURL)
+        guard !Task.isCancelled,
+              let data,
               let jpeg = Self.jpegData(from: data) else {
             return nil
         }

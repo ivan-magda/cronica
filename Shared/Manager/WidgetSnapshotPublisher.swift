@@ -110,15 +110,18 @@ final class WidgetSnapshotPublisher {
         case .recentActivity:
             return filtered.sorted { $0.itemLastUpdateDate > $1.itemLastUpdateDate }
         case .watchProgress:
-            return filtered.sorted {
-                if $0.watchProgress != $1.watchProgress {
-                    return $0.watchProgress > $1.watchProgress
+            return filtered.map { item in
+                (item: item, progress: item.watchProgress,
+                 watchedCount: item.watchedEpisodeCount, date: item.itemLastUpdateDate)
+            }.sorted {
+                if $0.progress != $1.progress {
+                    return $0.progress > $1.progress
                 }
-                if $0.watchedEpisodeCount != $1.watchedEpisodeCount {
-                    return $0.watchedEpisodeCount > $1.watchedEpisodeCount
+                if $0.watchedCount != $1.watchedCount {
+                    return $0.watchedCount > $1.watchedCount
                 }
-                return $0.itemLastUpdateDate > $1.itemLastUpdateDate
-            }
+                return $0.date > $1.date
+            }.map(\.item)
         }
     }
 

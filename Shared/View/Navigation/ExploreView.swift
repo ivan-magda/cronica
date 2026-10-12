@@ -603,16 +603,16 @@ extension ExploreView {
         }
     }
     
-    private func fetchAllItemsIDs(_ media: MediaType) -> [String] {
+    private func fetchAllItemsIDs(_ media: MediaType) -> Set<String> {
         let persistence = PersistenceController.shared
         let request: NSFetchRequest<WatchlistItem> = WatchlistItem.fetchRequest()
         let typePredicate = NSPredicate(format: "contentType == %d", media.toInt)
         request.predicate = typePredicate
         do {
             let list = try persistence.container.viewContext.fetch(request)
-            var ids = [String]()
+            var ids = Set<String>()
             for item in list {
-                ids.append(item.itemContentID)
+                ids.insert(item.itemContentID)
             }
             return ids
         } catch {

@@ -12,6 +12,8 @@ import CronicaCore
 /// ratings, and favorites. Manual Sync Now always runs; foreground checks are throttled.
 @MainActor
 enum TMDBSyncService {
+    private static var isSyncingOnForeground = false
+
     /// Match SIMKL’s ~20 minute foreground throttle.
     nonisolated static let foregroundThrottleInterval: TimeInterval = 20 * 60
 
@@ -49,6 +51,10 @@ enum TMDBSyncService {
         ) {
             return
         }
+        guard !isSyncingOnForeground else { return }
+        isSyncingOnForeground = true
+        defer { isSyncingOnForeground = false }
+
         do {
             // Light check: page-1 conditional GETs when ETags exist; skip full pull if unchanged.
             if TMDBAccountListCache.loadFingerprint() != nil,

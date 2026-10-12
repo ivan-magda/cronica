@@ -9,6 +9,8 @@ import CronicaCore
 /// Pulls SIMKL → Cronica using the official two-phase model (full, then activities + date_from).
 @MainActor
 enum SimklSyncService {
+    private static var isSyncingOnForeground = false
+
     /// SIMKL recommends throttling wake/startup activity checks to once every 15–30 minutes.
     nonisolated static let foregroundThrottleInterval: TimeInterval = 20 * 60
 
@@ -131,6 +133,10 @@ enum SimklSyncService {
     static func syncIfNeededOnForeground() async {
         guard Key.isSimklConfigured, SimklTokenStore.hasToken else { return }
         guard !SettingsStore.shared.simklActivitiesAll.isEmpty else { return }
+        guard !isSyncingOnForeground else { return }
+        isSyncingOnForeground = true
+        defer { isSyncingOnForeground = false }
+
         do {
             _ = try await incrementalSync(ignoreThrottle: false)
             if SettingsStore.shared.simklPushEnabled {

@@ -62,19 +62,24 @@ final class BackgroundManager {
 	}
 	
 	func handleWatchingContentRefresh() async {
+		guard !Task.isCancelled else { return }
 		let items = self.fetchWatchingItems()
 		await self.fetchUpdates(items: items)
+		guard !Task.isCancelled else { return }
 		WidgetSnapshotPublisherBridge.scheduleRefreshIfAvailable()
 	}
 	
 	func handleUpcomingContentRefresh() async {
+		guard !Task.isCancelled else { return }
 		let items = self.fetchUpcomingItems()
 		if items.isEmpty { return }
 		await self.fetchUpdates(items: items)
+		guard !Task.isCancelled else { return }
 		WidgetSnapshotPublisherBridge.scheduleRefreshIfAvailable()
 	}
 	
 	func handleAppRefreshMaintenance() async {
+		guard !Task.isCancelled else { return }
 		let items = self.fetchReleasedItems()
 		if items.isEmpty { return }
 		await self.fetchUpdates(items: items)
@@ -155,6 +160,7 @@ final class BackgroundManager {
 	/// Updates every item in the items array, update it in CoreData if needed, and update notification schedule.
 	private func fetchUpdates(items: [RefreshTarget]) async {
 		for item in items {
+			guard !Task.isCancelled else { return }
 			if item.isMovie {
 				await update(item)
 			} else if item.isArchive || item.schedule == .ended || item.isWatched {
@@ -168,8 +174,10 @@ final class BackgroundManager {
 	}
 	
 	private func update(_ item: RefreshTarget) async {
+		guard !Task.isCancelled else { return }
 		do {
 			let content = try await self.network.fetchItem(id: item.itemId, type: item.media)
+			guard !Task.isCancelled else { return }
 			if content.itemCanNotify && item.shouldNotify {
                 if item.itemDate.areDifferentDates(with: content.itemFallbackDate) {
                     notifications.removeNotification(identifier: content.itemContentID)
@@ -189,6 +197,7 @@ final class BackgroundManager {
             }
 			PersistenceController.shared.update(item: content)
 		} catch {
+			guard !Task.isCancelled else { return }
 			AppLogger.background.error("Failed to refresh item \(item.contentID): \(error.localizedDescription)")
 #if !os(watchOS)
 			SentryManager.capture(error, context: ["source": "BackgroundManager.update", "contentID": item.contentID])

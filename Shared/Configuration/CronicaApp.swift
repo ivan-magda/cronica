@@ -314,11 +314,15 @@ struct CronicaApp: App {
         scheduleAppRefresh()
 
         let workItem = Task {
+            guard !Task.isCancelled else { return }
             await BackgroundManager.shared.handleWatchingContentRefresh()
+            guard !Task.isCancelled else { return }
             BackgroundManager.shared.lastWatchingRefresh = Date()
             await BackgroundManager.shared.handleUpcomingContentRefresh()
+            guard !Task.isCancelled else { return }
             BackgroundManager.shared.lastUpcomingRefresh = Date()
             await BackgroundManager.shared.handleAppRefreshMaintenance()
+            guard !Task.isCancelled else { return }
             BackgroundManager.shared.lastMaintenance = Date()
             guard !Task.isCancelled else { return }
             task.setTaskCompleted(success: true)

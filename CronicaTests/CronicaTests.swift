@@ -273,6 +273,52 @@ final class CronicaTests: XCTestCase {
         XCTAssertEqual(try managedContext.count(for: request), 1)
     }
 
+    @MainActor
+    func testWatchlistBackupFilePreservesUnsavedSnapshot() async throws {
+        let example = try XCTUnwrap(ItemContent.examples.first)
+        let item = requireItem(for: example.itemContentID)
+        item.userNotes = "unsaved backup note"
+        let backups = try persistence.watchlistBackupSnapshot()
+        item.userNotes = "changed after snapshot"
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("backup.json")
+
+        let exportedURL: URL = try await withCheckedThrowingContinuation { continuation in
+            WatchlistBackupExporter.write(backups, to: destination) { result in
+                continuation.resume(with: result)
+            }
+        }
+
+        XCTAssertEqual(exportedURL, destination)
+        let decoded = try JSONDecoder().decode([WatchlistItemBackup].self, from: Data(contentsOf: exportedURL))
+        XCTAssertEqual(decoded, backups)
+        XCTAssertEqual(decoded.first(where: { $0.contentID == example.itemContentID })?.userNotes,
+                       "unsaved backup note")
+        XCTAssertEqual(item.userNotes, "changed after snapshot")
+    }
+
+    @MainActor
+    func testWatchlistBackupFileReportsWriteFailure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("backup.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+
+        do {
+            let _: URL = try await withCheckedThrowingContinuation { continuation in
+                WatchlistBackupExporter.write([], to: destination) { result in
+                    continuation.resume(with: result)
+                }
+            }
+            XCTFail("Expected a write failure for a missing directory")
+        } catch {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+
     func testWatchProgressUsesCachedEpisodeTotal() {
         let item = WatchlistItem(context: managedContext)
         item.title = "Progress Show"

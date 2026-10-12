@@ -192,9 +192,12 @@ struct PersistenceController {
     }
 
     func exportWatchlistBackup() throws -> Data {
+        try JSONEncoder().encode(watchlistBackupSnapshot())
+    }
+
+    func watchlistBackupSnapshot() throws -> [WatchlistItemBackup] {
         let items = try container.viewContext.fetch(WatchlistItem.fetchRequest())
-        let backups = items.map(WatchlistItemBackup.init(item:))
-        return try JSONEncoder().encode(backups)
+        return items.map(WatchlistItemBackup.init(item:))
     }
 #endif
 

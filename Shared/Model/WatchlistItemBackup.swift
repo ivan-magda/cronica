@@ -8,7 +8,7 @@ import CoreData
 
 /// Codable transfer model for watchlist backup/restore.
 /// Kept separate from `WatchlistItem` so restore can upsert by `contentID` without duplicating rows.
-struct WatchlistItemBackup: Codable, Equatable {
+struct WatchlistItemBackup: Codable, Equatable, Sendable {
     var id: Int64
     var title: String
     var contentID: String
@@ -123,6 +123,26 @@ struct WatchlistItemBackup: Codable, Equatable {
         firstAirDate = try values.decodeIfPresent(Date.self, forKey: .firstAirDate)
         movieReleaseDate = try values.decodeIfPresent(Date.self, forKey: .movieReleaseDate)
         numberOfEpisodes = try values.decodeIfPresent(Int64.self, forKey: .numberOfEpisodes) ?? 0
+    }
+}
+
+enum WatchlistBackupExporter {
+    // Multiple settings windows can export to the same dated filename.
+    private static let queue = DispatchQueue(label: "WatchlistBackupExporter", qos: .userInitiated)
+
+    static func write(_ backups: [WatchlistItemBackup],
+                      to url: URL,
+                      completion: @escaping @MainActor @Sendable (Result<URL, Error>) -> Void) {
+        queue.async {
+            let result = Result<URL, Error> {
+                let jsonData = try JSONEncoder().encode(backups)
+                try jsonData.write(to: url, options: .atomic)
+                return url
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
     }
 }
 
